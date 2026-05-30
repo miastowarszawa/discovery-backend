@@ -10,10 +10,27 @@ from app.models.scan import Scan
 from app.models.target import Target
 
 
-router = APIRouter(prefix="/api/v1/scans", tags=["scans"])
+router = APIRouter(tags=["scans"])
 
 
-@router.post("/start", status_code=status.HTTP_202_ACCEPTED)
+def sort_scan_events(events: list[Event]) -> list[Event]:
+    def event_sort_key(event: Event):
+        if event.event_type.endswith(".started"):
+            priority = 0
+        elif event.event_type.endswith(".completed"):
+            priority = 2
+        else:
+            priority = 1
+        return (priority, event.created_at, str(event.id))
+
+    return sorted(events, key=event_sort_key)
+
+
+def sort_target_scans(scans: list[Scan]) -> list[Scan]:
+    return sorted(scans, key=lambda scan: str(scan.id), reverse=True)
+
+
+@router.post("/api/v1/scans/start", status_code=status.HTTP_202_ACCEPTED)
 async def start_scan(target_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     target = await db.get(Target, target_id)
     if target is None:
@@ -40,7 +57,35 @@ async def start_scan(target_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.get("/{scan_id}/events")
+@router.get("/api/v1/targets/{target_id}/scans")
+async def get_target_scans(target_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    target = await db.get(Target, target_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    result = await db.execute(
+        select(Scan).where(Scan.target_id == target_id)
+    )
+    scans = list(result.scalars().all())
+    scans = sort_target_scans(scans)
+
+    return {
+        "target_id": str(target.id),
+        "items": [
+            {
+                "id": str(scan.id),
+                "target_id": str(scan.target_id),
+                "scan_type": scan.scan_type,
+                "status": scan.status,
+                "config_json": scan.config_json,
+                "result_json": scan.result_json,
+            }
+            for scan in scans
+        ],
+    }
+
+
+@router.get("/api/v1/scans/{scan_id}/events")
 async def get_scan_events(scan_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     scan = await db.get(Scan, scan_id)
     if scan is None:
@@ -50,17 +95,7 @@ async def get_scan_events(scan_id: uuid.UUID, db: AsyncSession = Depends(get_db)
         select(Event).where(Event.scan_id == scan_id)
     )
     events = list(result.scalars().all())
-
-    def event_sort_key(event: Event):
-        if event.event_type.endswith(".started"):
-            priority = 0
-        elif event.event_type.endswith(".completed"):
-            priority = 2
-        else:
-            priority = 1
-        return (priority, event.created_at, str(event.id))
-
-    events.sort(key=event_sort_key)
+    events = sort_scan_events(events)
 
     return {
         "scan_id": str(scan.id),
@@ -76,7 +111,7 @@ async def get_scan_events(scan_id: uuid.UUID, db: AsyncSession = Depends(get_db)
     }
 
 
-@router.get("/{scan_id}")
+@router.get("/api/v1/scans/{scan_id}")
 async def get_scan(scan_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     scan = await db.get(Scan, scan_id)
     if scan is None:
